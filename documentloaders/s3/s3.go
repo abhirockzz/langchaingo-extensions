@@ -3,9 +3,11 @@ package s3
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -53,7 +55,9 @@ func NewS3FileLoader(bucketName, key string) S3FileLoader {
 // Load reads from the io.Reader and returns a single document with the data.
 func (l S3FileLoader) Load(_ context.Context) ([]schema.Document, error) {
 
-	resp, err := l.s3Client.GetObject(context.Background(), &s3.GetObjectInput{
+	ctx := context.Background()
+
+	resp, err := l.s3Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(l.bucketName),
 		Key:    aws.String(l.key),
 	})
@@ -63,18 +67,22 @@ func (l S3FileLoader) Load(_ context.Context) ([]schema.Document, error) {
 	}
 	defer resp.Body.Close()
 
-	buf := new(bytes.Buffer)
-	_, err = io.Copy(buf, resp.Body)
-	if err != nil {
-		return nil, err
+	if strings.HasSuffix(l.key, ".txt") {
+		return l.loadText(ctx, resp.Body)
 	}
 
-	return []schema.Document{
-		{
-			PageContent: buf.String(),
-			Metadata:    map[string]any{"key": l.key},
-		},
-	}, nil
+	if strings.HasSuffix(l.key, ".pdf") {
+
+		buf := new(bytes.Buffer)
+		_, err = io.Copy(buf, resp.Body)
+
+		if err != nil {
+			return nil, err
+		}
+		return l.loadPDF(ctx, bytes.NewReader(buf.Bytes()), int64(len(buf.Bytes())))
+	}
+
+	return nil, errors.New("pdf and txt files supported")
 }
 
 // LoadAndSplit reads text data from the io.Reader and splits it into multiple
@@ -86,4 +94,12 @@ func (l S3FileLoader) LoadAndSplit(ctx context.Context, splitter textsplitter.Te
 	}
 
 	return textsplitter.SplitDocuments(splitter, docs)
+}
+
+func (l S3FileLoader) loadPDF(_ context.Context, content io.ReaderAt, size int64) ([]schema.Document, error) {
+	return documentloaders.NewPDF(content, size).Load(context.Background())
+}
+
+func (l S3FileLoader) loadText(_ context.Context, content io.Reader) ([]schema.Document, error) {
+	return documentloaders.NewText(content).Load(context.Background())
 }
